@@ -1,0 +1,13 @@
+{
+  "name": "service-registry-api",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "viem": "^2.0.0",
+    "express": "^4.18.0"
+  }
+}
