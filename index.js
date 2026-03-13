@@ -2,6 +2,7 @@ import express from 'express';
 import { createPublicClient, http, formatEther } from 'viem';
 import { base } from 'viem/chains';
 import { SERVICE_REGISTRY_ABI, CATEGORIES } from './abi.js';
+import { getProtocolStatsCached, runMonitorCycle } from './monitor.js';
 
 const CONTRACT = '0xc6922DD8681B3d57A2955a5951E649EF38Ea1192';
 
@@ -150,11 +151,73 @@ app.get('/categories', (req, res) => {
   res.json({ categories: CATEGORIES });
 });
 
+// GET /stats — protocol-level metrics (TVL, calls, treasury, reputation dist)
+app.get('/stats', async (req, res) => {
+  try {
+    const stats = await getProtocolStatsCached();
+
+    // Reputation distribution
+    const repBuckets = { low: 0, medium: 0, high: 0, elite: 0 };
+    for (const svc of stats.services) {
+      const rep = Number(svc.reputationScore);
+      if (rep >= 8000)      repBuckets.elite++;
+      else if (rep >= 6000) repBuckets.high++;
+      else if (rep >= 4000) repBuckets.medium++;
+      else                  repBuckets.low++;
+    }
+
+    res.json({
+      protocol: 'ServiceRegistry',
+      contract: '0xc6922DD8681B3d57A2955a5951E649EF38Ea1192',
+      chain: 'base',
+      chainId: 8453,
+      metrics: {
+        totalServices:  stats.totalServices,
+        activeServices: stats.activeServices,
+        totalStakedETH: stats.totalStakedETH,
+        totalStakedUSD: stats.totalStakedUSD,
+        totalCalls:     stats.totalCalls,
+        treasuryETH:    stats.treasuryETH,
+      },
+      reputationDistribution: repBuckets,
+      topServices: stats.services
+        .filter(s => s.active)
+        .sort((a, b) => Number(b.reputationScore) - Number(a.reputationScore))
+        .slice(0, 5)
+        .map(s => ({
+          id: s.id,
+          name: s.name,
+          reputationScore: Number(s.reputationScore),
+          reputationPct: (Number(s.reputationScore) / 100).toFixed(1) + '%',
+          totalCalls: Number(s.totalCalls),
+          stakedETH: formatEther(s.stakedETH),
+        })),
+      timestamp: Date.now(),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /monitor/run — manually trigger a monitor cycle
+app.post('/monitor/run', async (req, res) => {
+  try {
+    const stats = await runMonitorCycle();
+    res.json({ success: true, stats });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`ServiceRegistry API running on :${PORT}`);
+  console.log(`ServiceRegistry API :${PORT}`);
   console.log(`Contract: ${CONTRACT}`);
-  console.log(`Chain: Base Mainnet (8453)`);
+  console.log(`Routes: /health /services /stats /monitor/run /categories`);
+
+  // Run monitor cycle on boot, then every 30 min
+  runMonitorCycle().catch(console.error);
+  setInterval(() => runMonitorCycle().catch(console.error), 30 * 60 * 1000);
 });
