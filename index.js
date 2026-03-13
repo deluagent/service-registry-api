@@ -1,6 +1,8 @@
 import express from 'express';
-import { createPublicClient, http, formatEther } from 'viem';
+import { createPublicClient, http, formatEther, isAddress } from 'viem';
 import { base } from 'viem/chains';
+import { mainnet } from 'viem/chains';
+import { normalize } from 'viem/ens';
 import { SERVICE_REGISTRY_ABI, CATEGORIES } from './abi.js';
 import { getProtocolStatsCached, runMonitorCycle } from './monitor.js';
 
@@ -9,6 +11,12 @@ const CONTRACT = '0xc6922DD8681B3d57A2955a5951E649EF38Ea1192';
 const client = createPublicClient({
   chain: base,
   transport: http('https://mainnet.base.org'),
+});
+
+// Mainnet client for ENS (ENS is on Ethereum L1)
+const ensClient = createPublicClient({
+  chain: mainnet,
+  transport: http('https://ethereum-rpc.publicnode.com'),
 });
 
 const app = express();
@@ -199,6 +207,61 @@ app.get('/stats', async (req, res) => {
   }
 });
 
+// GET /ens/:name — resolve ENS name → find services owned by that address
+app.get('/ens/:name', async (req, res) => {
+  const ensName = req.params.name;
+
+  // Validate it looks like an ENS name
+  if (!ensName.includes('.')) {
+    return res.status(400).json({ error: 'invalid ENS name — must contain a dot (e.g. delu.eth)' });
+  }
+
+  // Resolve ENS name → address on Ethereum mainnet
+  let address;
+  try {
+    const normalized = normalize(ensName);
+    address = await ensClient.getEnsAddress({ name: normalized });
+  } catch (e) {
+    return res.status(400).json({ error: `ENS normalization failed: ${e.message}` });
+  }
+
+  if (!address) {
+    return res.status(404).json({
+      ensName,
+      address: null,
+      services: [],
+      message: `${ensName} is not registered in ENS or has no address record`,
+    });
+  }
+
+  // Find services owned by this address in the ServiceRegistry on Base
+  try {
+    const allServices = await getAllServices();
+    const ownedServices = allServices.filter(
+      s => s.owner.toLowerCase() === address.toLowerCase()
+    );
+
+    // Optionally enrich: try to get the primary ENS name of the resolved address
+    // (may differ from ensName if it's a subdomain or alias)
+    let primaryName = null;
+    try {
+      primaryName = await ensClient.getEnsName({ address });
+    } catch {
+      // non-critical
+    }
+
+    res.json({
+      ensName,
+      primaryEnsName: primaryName,
+      address,
+      serviceCount: ownedServices.length,
+      services: ownedServices,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /monitor/run — manually trigger a monitor cycle
 app.post('/monitor/run', async (req, res) => {
   try {
@@ -215,7 +278,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`ServiceRegistry API :${PORT}`);
   console.log(`Contract: ${CONTRACT}`);
-  console.log(`Routes: /health /services /stats /monitor/run /categories`);
+  console.log(`Routes: /health /services /stats /monitor/run /categories /ens/:name`);
 
   // Run monitor cycle on boot, then every 30 min
   runMonitorCycle().catch(console.error);
